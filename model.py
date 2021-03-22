@@ -81,7 +81,7 @@ class ScoreNet(nn.Module):
         # Obtain the Gaussian random feature embedding for t
         embed = self.act(self.embed(t))
 
-        assert not torch.isnan(torch.sum(embed))
+        # assert not torch.isnan(torch.sum(embed))
 
         # Encoding path
         h1 = self.conv1(x)
@@ -118,10 +118,10 @@ class ScoreNet(nn.Module):
         h = self.tgnorm2(h)
         h = self.act(h)
         h = self.tconv1(torch.cat([h, h1], dim=1))
-        assert not torch.isnan(torch.sum(h))
+        # assert not torch.isnan(torch.sum(h))
 
         # Normalize output
-        h = h / self.marginal_prob_std(t)[:, None, None, None]
+        # h = h / self.marginal_prob_std(t)[:, None, None, None]
         # print(self.marginal_prob_std(t))
-        assert not torch.isnan(torch.sum(h))
+        # assert not torch.isnan(torch.sum(h))
         return h

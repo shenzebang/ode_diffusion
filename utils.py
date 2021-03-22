@@ -2,7 +2,7 @@ import functools
 import torch
 import numpy as np
 
-device = 'cuda'  # @param ['cuda', 'cpu'] {'type':'string'}
+device = 'cuda:5'  # @param ['cuda', 'cpu'] {'type':'string'}
 
 
 def marginal_prob_std(t, sigma):
@@ -15,8 +15,8 @@ def marginal_prob_std(t, sigma):
     Returns:
       The standard deviation.
     """
-    t = torch.tensor(t, device=device)
-    return torch.clamp(torch.sqrt((sigma ** (2 * t) - 1.) / 2. / np.log(sigma)), min=1e-2, max=1e10)
+    # t = torch.tensor(t, device=device)
+    return torch.sqrt((sigma ** (2 * t) - 1.) / 2. / np.log(sigma))
 
 
 def diffusion_coeff(t, sigma):
@@ -29,7 +29,8 @@ def diffusion_coeff(t, sigma):
     Returns:
       The vector of diffusion coefficients.
     """
-    return torch.tensor(sigma ** t, device=device)
+    # return torch.tensor(sigma ** t, device=device)
+    return sigma ** t
 
 
 sigma = 25.0  # @param {'type':'number'}

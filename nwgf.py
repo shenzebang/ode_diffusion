@@ -15,7 +15,7 @@ def sample_gaussian_like(y):
 
 
 class ODEDiffusioin(nn.Module):
-    def __init__(self, score_net, diffusion_coeff_fn, exp_decay=1):
+    def __init__(self, score_net, diffusion_coeff_fn, exp_decay=1.0):
         super(ODEDiffusioin, self).__init__()
         self.score_net = score_net
         self.exp_decay = exp_decay
@@ -33,7 +33,7 @@ class ODEDiffusioin(nn.Module):
     def forward(self, t, states):
         x = states[0]
         score = states[1]
-        t = torch.tensor(t).type_as(x)
+        t = torch.tensor(t).type_as(x).to(x)
         eps = 0
         _t = torch.ones(x.shape[0], device=x.device) * (t * (1. - eps) + eps)
 
@@ -68,13 +68,14 @@ class ODEDiffusioin(nn.Module):
 
 
 class NWGFDiffusion(nn.Module):
-    def __init__(self, ode_diffusion, T=1.0, solver='dopri5', atol=1e-3, rtol=1e-3):
+    def __init__(self, ode_diffusion, score_0, T=1.0, solver='dopri5', atol=1e-3, rtol=1e-3):
         super(NWGFDiffusion, self).__init__()
         self.rtol = rtol
         self.atol = atol
         self.solver = solver
         self.T = T
         self.ode_diffusion = ode_diffusion
+        self.score_0 = score_0
 
     def forward(self, x_0):
         eps = 1e-5
@@ -84,10 +85,8 @@ class NWGFDiffusion(nn.Module):
 
 
 
-        score_0 = self.ode_diffusion.score_net(x_0, t_0)
+        score_0 = self.score_0(x_0, t_0).detach()
         wgf_reg_0 = torch.zeros([1]).to(x_0)
-
-        assert not torch.isnan(torch.sum(score_0))
 
         self.ode_diffusion.before_odeint()
 
@@ -111,13 +110,15 @@ class NWGFDiffusion(nn.Module):
         return self.ode_diffusion._num_evals.item()
 
 
-def build_nwgf(score_net, diffusion_coeff_fn, time_length=1.0):
+def build_nwgf(score_net, score_0, diffusion_coeff_fn, time_length=1.0, exp_decay=1.0):
     ode_diffusion = ODEDiffusioin(
         score_net=score_net,
         diffusion_coeff_fn=diffusion_coeff_fn,
+        exp_decay=exp_decay
     )
     model = NWGFDiffusion(
         ode_diffusion=ode_diffusion,
+        score_0=score_0,
         T=time_length
     )
 
