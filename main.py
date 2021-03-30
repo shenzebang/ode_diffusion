@@ -12,8 +12,12 @@ from sampler import ode_sampler
 from likelihood import ode_likelihood
 import matplotlib.pyplot as plt
 import numpy as np
-
+import argparse
+import time
 from nwgf import build_nwgf
+
+DataParallel = lambda x: torch.nn.DataParallel(x, device_ids=[4, 5, 6, 7, 2, 3], output_device=4)
+
 
 def loss_fn(model, x, marginal_prob_std, eps=1e-5):
     """The loss function for training score-based generative models.
@@ -56,7 +60,6 @@ def train_score_net_init():
         num_items = 0
         for x, y in data_loader:
             x = x.to(device)
-            # x = x / 255.
             loss = loss_fn(score_model, x, marginal_prob_std_fn)
             optimizer.zero_grad()
             loss.backward()
@@ -67,6 +70,7 @@ def train_score_net_init():
         tqdm_epoch.set_description('Average Loss: {:5f}'.format(avg_loss / num_items))
         # Update the checkpoint after each epoch of training.
         torch.save(score_model.state_dict(), 'ckpt.pth')
+
 
 def train_nwgf():
     # score_model = torch.nn.DataParallel(ScoreNet(marginal_prob_std=marginal_prob_std_fn))
@@ -80,12 +84,13 @@ def train_nwgf():
 
     n_epochs = 50  # @param {'type':'integer'}
     ## size of a mini-batch
-    batch_size = 64  # @param {'type':'integer'}
+    batch_size = 96  # @param {'type':'integer'}
     ## learning rate
     lr = 1e-4  # @param {'type':'number'}
 
-    T = 1
-    exp_decay = 1./(25.**4)
+    T = 1.
+    # exp_decay = 1./(25.**4)
+    exp_decay = .005
     nwgf_model = build_nwgf(
         score_net=score_model,
         score_0=score_0,
@@ -94,41 +99,48 @@ def train_nwgf():
         exp_decay=exp_decay
     )
 
+    # nwgf_model = torch.nn.DataParallel(nwgf_model, device_ids=[4, 6], output_device=4).to(device)
+    nwgf_model = DataParallel(nwgf_model).to(device)
+
     dataset = MNIST('./data', train=True, transform=transforms.ToTensor(), download=True)
     data_loader = DataLoader(dataset, batch_size=batch_size, shuffle=True, num_workers=16)
 
     optimizer = Adam(nwgf_model.parameters(), lr=lr)
     tqdm_epoch = tqdm.trange(n_epochs)
     steps = 0
+    time_0 = time.time()
     for epoch in tqdm_epoch:
         avg_loss = 0.
         num_items = 0
         for x, y in data_loader:
             steps += 1
             x = x.to(device)
-            # x = x / 255.
-            loss = nwgf_model(x)
-            print(loss.item())
+            loss = torch.mean(nwgf_model(x))
+            # print(loss.shape)
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
             avg_loss += loss.item() * x.shape[0]
             num_items += x.shape[0]
-            # if steps % 50 == 0:
-            torch.save(score_model.state_dict(), f'nwgf_ckpt_{steps}.pth')
+            if steps % 50 == 0:
+                torch.save(score_model.state_dict(), f'nwgf_ckpt_{steps}.pth')
+            print(f"step {steps}, loss {loss.item()}, time {time.time() - time_0}")
         # Print the averaged training loss so far.
         tqdm_epoch.set_description('Average Loss: {:5f}'.format(avg_loss / num_items))
         # Update the checkpoint after each epoch of training.
         torch.save(score_model.state_dict(), 'nwgf_ckpt.pth')
 
-def test():
+
+def test(args):
     # score_model = torch.nn.DataParallel(ScoreNet(marginal_prob_std=marginal_prob_std_fn))
     # score_model = score_model.to(device)
     score_model = ScoreNet(marginal_prob_std=marginal_prob_std_fn).to(device)
-    step = 20
+    step = args.i
     ## Load the pre-trained checkpoint from disk.
-    ckpt = torch.load(f'nwgf_ckpt_{step}.pth', map_location=device)
-    # ckpt = torch.load('ckpt.pth', map_location=device)
+    if step > 0:
+        ckpt = torch.load(f'nwgf_ckpt_{step}.pth', map_location=device)
+    else:
+        ckpt = torch.load('ckpt.pth', map_location=device)
     score_model.load_state_dict(ckpt)
 
     sample_batch_size = 64  # @param {'type':'integer'}
@@ -141,7 +153,10 @@ def test():
                       sample_batch_size,
                       device=device)
 
+    print(torch.max(samples))
+
     ## Sample visualization.
+
     samples = samples.clamp(0.0, 1.0)
 
     sample_grid = make_grid(samples, nrow=int(np.sqrt(sample_batch_size)))
@@ -149,13 +164,11 @@ def test():
     plt.figure(figsize=(6, 6))
     plt.axis('off')
     plt.imshow(sample_grid.permute(1, 2, 0).cpu(), vmin=0., vmax=1.)
-    plt.savefig(f"sample_{step}.png")
-    # plt.savefig("sample.png")
+    if step > 0:
+        plt.savefig(f"sample/sample_{step}.png")
+    else:
+        plt.savefig("sample/sample.png")
     plt.show()
-
-
-
-
 
 
 def test_likelihood():
@@ -191,10 +204,17 @@ def test_likelihood():
         pass
 
 
-
 # Press the green button in the gutter to run the script.
 if __name__ == '__main__':
+    parser = argparse.ArgumentParser("diffusion")
+    parser.add_argument('--test', action='store_true', help='Whether to test the model')
+    parser.add_argument('--i', type=int, default=1, help='test the performance at i th step')
+    args = parser.parse_args()
+
+    if args.test:
+        test(args)
+    else:
+        train_nwgf()
+
     # train_score_net_init()
-    # train_nwgf()
-    test()
     # test_likelihood()

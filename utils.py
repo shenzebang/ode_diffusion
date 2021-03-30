@@ -2,7 +2,7 @@ import functools
 import torch
 import numpy as np
 
-device = 'cuda:5'  # @param ['cuda', 'cpu'] {'type':'string'}
+device = 'cuda:4'  # @param ['cuda', 'cpu'] {'type':'string'}
 
 
 def marginal_prob_std(t, sigma):

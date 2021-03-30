@@ -47,6 +47,7 @@ def ode_sampler(score_model,
         time_steps = torch.tensor(time_steps, device=device, dtype=torch.float32).reshape((sample.shape[0],))
         with torch.no_grad():
             score = score_model(sample, time_steps)
+            print(f"t {time_steps[0]}, norm {torch.max(torch.sum(score ** 2, dim=(1, 2, 3)))}")
         return score.cpu().numpy().reshape((-1,)).astype(np.float64)
 
     def ode_func(t, x):
