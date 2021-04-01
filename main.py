@@ -15,8 +15,10 @@ import numpy as np
 import argparse
 import time
 from nwgf import build_nwgf
+from torch.nn import DataParallel
+from os import path
 
-DataParallel = lambda x: torch.nn.DataParallel(x, device_ids=[4, 5, 6, 7, 2, 3], output_device=4)
+# if torch.cuda.device_count() > 1:
 
 
 def loss_fn(model, x, marginal_prob_std, eps=1e-5):
@@ -39,10 +41,11 @@ def loss_fn(model, x, marginal_prob_std, eps=1e-5):
     return loss
 
 
-def train_score_net_init():
+def train_score_net_init(args):
     # score_model = torch.nn.DataParallel(ScoreNet(marginal_prob_std=marginal_prob_std_fn))
     # score_model = score_model.to(device)
     score_model = ScoreNet(marginal_prob_std=marginal_prob_std_fn).to(device)
+
 
     n_epochs = 50  # @param {'type':'integer'}
     ## size of a mini-batch
@@ -72,7 +75,7 @@ def train_score_net_init():
         torch.save(score_model.state_dict(), 'ckpt.pth')
 
 
-def train_nwgf():
+def train_nwgf(args):
     # score_model = torch.nn.DataParallel(ScoreNet(marginal_prob_std=marginal_prob_std_fn))
     # score_model = score_model.to(device)
     score_model = ScoreNet(marginal_prob_std=marginal_prob_std_fn).to(device)
@@ -82,25 +85,28 @@ def train_nwgf():
     score_model.load_state_dict(ckpt)
     score_0.load_state_dict(ckpt)
 
-    n_epochs = 50  # @param {'type':'integer'}
+    n_epochs = args.n_epochs  # @param {'type':'integer'}
     ## size of a mini-batch
-    batch_size = 96  # @param {'type':'integer'}
+    batch_size = args.batch_size  # @param {'type':'integer'}
     ## learning rate
-    lr = 1e-4  # @param {'type':'number'}
+    lr = args.lr  # @param {'type':'number'}
 
     T = 1.
     # exp_decay = 1./(25.**4)
-    exp_decay = .005
+    exp_decay_fn = lambda t: .001**(T-t)
     nwgf_model = build_nwgf(
         score_net=score_model,
         score_0=score_0,
         diffusion_coeff_fn=diffusion_coeff_fn,
         time_length=T,
-        exp_decay=exp_decay
+        exp_decay_fn=exp_decay_fn
     )
 
+    if torch.cuda.device_count() > 1:
+        device_ids = [int(a) for a in args.device_ids.split(",")]
+        nwgf_model = DataParallel(nwgf_model, device_ids).to(device)
     # nwgf_model = torch.nn.DataParallel(nwgf_model, device_ids=[4, 6], output_device=4).to(device)
-    nwgf_model = DataParallel(nwgf_model).to(device)
+
 
     dataset = MNIST('./data', train=True, transform=transforms.ToTensor(), download=True)
     data_loader = DataLoader(dataset, batch_size=batch_size, shuffle=True, num_workers=16)
@@ -122,7 +128,7 @@ def train_nwgf():
             optimizer.step()
             avg_loss += loss.item() * x.shape[0]
             num_items += x.shape[0]
-            if steps % 50 == 0:
+            if steps % 2 == 0:
                 torch.save(score_model.state_dict(), f'nwgf_ckpt_{steps}.pth')
             print(f"step {steps}, loss {loss.item()}, time {time.time() - time_0}")
         # Print the averaged training loss so far.
@@ -151,7 +157,8 @@ def test(args):
                       marginal_prob_std_fn,
                       diffusion_coeff_fn,
                       sample_batch_size,
-                      device=device)
+                      device=device,
+                      eps=0)
 
     print(torch.max(samples))
 
@@ -208,13 +215,19 @@ def test_likelihood():
 if __name__ == '__main__':
     parser = argparse.ArgumentParser("diffusion")
     parser.add_argument('--test', action='store_true', help='Whether to test the model')
-    parser.add_argument('--i', type=int, default=1, help='test the performance at i th step')
+    parser.add_argument('--i', type=int, default=50, help='test the performance at i th step')
+    parser.add_argument('--n_epochs', type=int, default=50, help='max epochs of nwgf training')
+    parser.add_argument('--batch_size', type=int, default=32, help='batch size of nwgf training')
+    parser.add_argument('--lr', type=float, default=1e-4, help='learning rate of nwgf training')
+    parser.add_argument('--device_ids', type=str, default='0,')
     args = parser.parse_args()
+
+    if not path.exists('ckpt.pth'):
+        train_score_net_init(args)
 
     if args.test:
         test(args)
     else:
-        train_nwgf()
+        train_nwgf(args)
 
-    # train_score_net_init()
     # test_likelihood()

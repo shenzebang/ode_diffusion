@@ -3,28 +3,32 @@ import torch.nn as nn
 from torchdiffeq import odeint_adjoint as odeint
 
 
-def divergence_approx(f, y, e=None):
+def divergence_approx(f, y, e):
+    # print(e.shape)
     e_dzdx = torch.autograd.grad(f, y, e, create_graph=True)[0]
     e_dzdx_e = e_dzdx * e
     approx_tr_dzdx = e_dzdx_e.view(y.shape[0], -1).sum(dim=1)
     return approx_tr_dzdx
 
+def divergence_batch(f, y, e_batch):
+    return torch.mean(torch.stack([divergence_approx(f, y, e) for e in e_batch], dim=1), dim=1)
 
 def sample_gaussian_like(y):
     return torch.randn_like(y)
 
 
 class ODEDiffusioin(nn.Module):
-    def __init__(self, score_net, diffusion_coeff_fn, exp_decay=1.0):
+    def __init__(self, score_net, diffusion_coeff_fn, exp_decay_fn):
         super(ODEDiffusioin, self).__init__()
         self.score_net = score_net
-        self.exp_decay = exp_decay
-        self.divergence_fn = divergence_approx
+        self.exp_decay_fn = exp_decay_fn
+        self.divergence_fn = divergence_batch
         self.register_buffer("_num_evals", torch.tensor(0.))
         self.diffusion_coeff_fn = diffusion_coeff_fn
+        self.div_n = 10
 
     def before_odeint(self, e=None):
-        self._e = e
+        self._e_batch = e
         self._num_evals.fill_(0)
 
     def num_evals(self):
@@ -39,8 +43,8 @@ class ODEDiffusioin(nn.Module):
         batchsize, n_channels, dim_1, dim_2 = x.shape
 
         # Sample and fix the noise.
-        if self._e is None:
-            self._e = sample_gaussian_like(x)
+        if self._e_batch is None:
+            self._e_batch = [sample_gaussian_like(x) for _ in range(self.div_n)]
 
         diffusion_weight = self.diffusion_coeff_fn(t)
 
@@ -48,12 +52,12 @@ class ODEDiffusioin(nn.Module):
             x.requires_grad_(True)
             score_pred = self.score_net(x, _t)
             dx = - diffusion_weight ** 2 * score_pred / 2
-            divergence = self.divergence_fn(dx, x, e=self._e).view(batchsize, 1)
+            divergence = self.divergence_fn(dx, x, e_batch=self._e_batch).view(batchsize, 1)
             dscore_1 = - torch.autograd.grad(torch.sum(divergence), x, create_graph=True)[0]
             dscore_2 = - torch.autograd.grad(torch.sum(dx * score.detach()), x, create_graph=True)[0]
             dscore = dscore_1 + dscore_2
             score_res = - score_pred + score
-            dwgf_reg_1 = self.exp_decay ** t * torch.sum(score_res ** 2)
+            dwgf_reg_1 = self.exp_decay_fn(t) * torch.sum(score_res ** 2)
             # mu = 1e-12
             #
             # dwgf_reg_2 = torch.sum(dx**2) * mu
@@ -85,7 +89,7 @@ class NWGFDiffusion(nn.Module):
     def forward(self, x_0):
         integration_times = torch.tensor([0.0, self.T]).to(x_0)
 
-        t_0 = torch.zeros(x_0.shape[0], device=x_0.device)
+        t_0 = torch.zeros(x_0.shape[0], device=x_0.device) + 1e-3
 
         score_0 = self.score_0(x_0, t_0).detach()
         # score_0 = self.ode_diffusion.score_net(x_0, t_0).detach()
@@ -114,11 +118,11 @@ class NWGFDiffusion(nn.Module):
         return self.ode_diffusion._num_evals.item()
 
 
-def build_nwgf(score_net, score_0, diffusion_coeff_fn, time_length=1.0, exp_decay=1.0, atol=1e-3, rtol=1e-3):
+def build_nwgf(score_net, score_0, diffusion_coeff_fn, exp_decay_fn, time_length=1.0, atol=1e-3, rtol=1e-3):
     ode_diffusion = ODEDiffusioin(
         score_net=score_net,
         diffusion_coeff_fn=diffusion_coeff_fn,
-        exp_decay=exp_decay
+        exp_decay_fn=exp_decay_fn
     )
     model = NWGFDiffusion(
         ode_diffusion=ode_diffusion,
