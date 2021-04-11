@@ -3,6 +3,7 @@ import torch.nn as nn
 from torchdiffeq import odeint_adjoint as odeint
 
 
+
 def divergence_approx(f, y, e):
     # print(e.shape)
     e_dzdx = torch.autograd.grad(f, y, e, create_graph=True)[0]
@@ -25,7 +26,7 @@ class ODEDiffusioin(nn.Module):
         self.divergence_fn = divergence_batch
         self.register_buffer("_num_evals", torch.tensor(0.))
         self.diffusion_coeff_fn = diffusion_coeff_fn
-        self.div_n = 10
+        self.div_n = 20
 
     def before_odeint(self, e=None):
         self._e_batch = e
@@ -51,7 +52,7 @@ class ODEDiffusioin(nn.Module):
         with torch.set_grad_enabled(True):
             x.requires_grad_(True)
             score_pred = self.score_net(x, _t)
-            dx = - diffusion_weight ** 2 * score_pred / 2
+            dx = - .5 * diffusion_weight ** 2 * score_pred
             divergence = self.divergence_fn(dx, x, e_batch=self._e_batch).view(batchsize, 1)
             dscore_1 = - torch.autograd.grad(torch.sum(divergence), x, create_graph=True)[0]
             dscore_2 = - torch.autograd.grad(torch.sum(dx * score.detach()), x, create_graph=True)[0]
@@ -77,7 +78,7 @@ class ODEDiffusioin(nn.Module):
 
 
 class NWGFDiffusion(nn.Module):
-    def __init__(self, ode_diffusion, score_0, T=1.0, solver='dopri5', atol=1e-5, rtol=1e-5):
+    def __init__(self, ode_diffusion, score_0, T=1.0, solver='dopri5', atol=1e-5, rtol=1e-5, score_0_t_0=1e-3):
         super(NWGFDiffusion, self).__init__()
         self.rtol = rtol
         self.atol = atol
@@ -85,11 +86,12 @@ class NWGFDiffusion(nn.Module):
         self.T = T
         self.ode_diffusion = ode_diffusion
         self.score_0 = score_0
+        self.score_0_t_0 = score_0_t_0
 
     def forward(self, x_0):
         integration_times = torch.tensor([0.0, self.T]).to(x_0)
 
-        t_0 = torch.zeros(x_0.shape[0], device=x_0.device) + 1e-3
+        t_0 = torch.zeros(x_0.shape[0], device=x_0.device) + self.score_0_t_0
 
         score_0 = self.score_0(x_0, t_0).detach()
         # score_0 = self.ode_diffusion.score_net(x_0, t_0).detach()
@@ -118,7 +120,7 @@ class NWGFDiffusion(nn.Module):
         return self.ode_diffusion._num_evals.item()
 
 
-def build_nwgf(score_net, score_0, diffusion_coeff_fn, exp_decay_fn, time_length=1.0, atol=1e-3, rtol=1e-3):
+def build_nwgf(score_net, score_0, diffusion_coeff_fn, exp_decay_fn, time_length=1.0, atol=1e-3, rtol=1e-3, score_0_t_0=1e-3):
     ode_diffusion = ODEDiffusioin(
         score_net=score_net,
         diffusion_coeff_fn=diffusion_coeff_fn,
@@ -129,7 +131,8 @@ def build_nwgf(score_net, score_0, diffusion_coeff_fn, exp_decay_fn, time_length
         score_0=score_0,
         T=time_length,
         atol=atol,
-        rtol=rtol
+        rtol=rtol,
+        score_0_t_0=score_0_t_0
     )
 
     return model

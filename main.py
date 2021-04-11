@@ -6,7 +6,7 @@ import torchvision.transforms as transforms
 from torchvision.datasets import MNIST
 import tqdm
 from model import ScoreNet
-from utils import marginal_prob_std_fn, diffusion_coeff_fn, device
+from utils import marginal_prob_std_fn, diffusion_coeff_fn
 from torchvision.utils import make_grid
 from sampler import ode_sampler
 from likelihood import ode_likelihood
@@ -16,7 +16,8 @@ import argparse
 import time
 from nwgf import build_nwgf
 from torch.nn import DataParallel
-from os import path
+import os
+
 
 # if torch.cuda.device_count() > 1:
 
@@ -46,7 +47,6 @@ def train_score_net_init(args):
     # score_model = score_model.to(device)
     score_model = ScoreNet(marginal_prob_std=marginal_prob_std_fn).to(device)
 
-
     n_epochs = 50  # @param {'type':'integer'}
     ## size of a mini-batch
     batch_size = 32  # @param {'type':'integer'}
@@ -75,14 +75,15 @@ def train_score_net_init(args):
         torch.save(score_model.state_dict(), 'ckpt.pth')
 
 
-def train_nwgf(args):
+def train_nwgf(args, device):
     # score_model = torch.nn.DataParallel(ScoreNet(marginal_prob_std=marginal_prob_std_fn))
     # score_model = score_model.to(device)
     score_model = ScoreNet(marginal_prob_std=marginal_prob_std_fn).to(device)
     score_0 = ScoreNet(marginal_prob_std=marginal_prob_std_fn).to(device)
-    ## Load the pre-trained checkpoint from disk.
     ckpt = torch.load('ckpt.pth', map_location=device)
-    score_model.load_state_dict(ckpt)
+    if not args.random_init:
+        ## Load the pre-trained checkpoint from disk.
+        score_model.load_state_dict(ckpt)
     score_0.load_state_dict(ckpt)
 
     n_epochs = args.n_epochs  # @param {'type':'integer'}
@@ -92,24 +93,28 @@ def train_nwgf(args):
     lr = args.lr  # @param {'type':'number'}
 
     T = 1.
-    # exp_decay = 1./(25.**4)
-    exp_decay_fn = lambda t: .001**(T-t)
+    exp_decay_fn = lambda t: args.exp_decay ** (T - t)
     nwgf_model = build_nwgf(
         score_net=score_model,
         score_0=score_0,
         diffusion_coeff_fn=diffusion_coeff_fn,
         time_length=T,
-        exp_decay_fn=exp_decay_fn
-    )
+        exp_decay_fn=exp_decay_fn,
+        atol=args.atol,
+        rtol=args.rtol,
+        score_0_t_0=args.score_0_t_0
+    ).to(device)
 
-    if torch.cuda.device_count() > 1:
-        device_ids = [int(a) for a in args.device_ids.split(",")]
+    device_ids = [int(a) for a in args.device_ids.split(",")]
+    if torch.cuda.device_count() > 1 and len(device_ids) > 1:
         nwgf_model = DataParallel(nwgf_model, device_ids).to(device)
     # nwgf_model = torch.nn.DataParallel(nwgf_model, device_ids=[4, 6], output_device=4).to(device)
 
-
     dataset = MNIST('./data', train=True, transform=transforms.ToTensor(), download=True)
     data_loader = DataLoader(dataset, batch_size=batch_size, shuffle=True, num_workers=16)
+
+    model_path = os.path.join(args.dir, 'models')
+    if not os.path.exists(model_path): os.makedirs(model_path)
 
     optimizer = Adam(nwgf_model.parameters(), lr=lr)
     tqdm_epoch = tqdm.trange(n_epochs)
@@ -129,22 +134,27 @@ def train_nwgf(args):
             avg_loss += loss.item() * x.shape[0]
             num_items += x.shape[0]
             if steps % 2 == 0:
-                torch.save(score_model.state_dict(), f'nwgf_ckpt_{steps}.pth')
+                torch.save(score_model.state_dict(), os.path.join(model_path, f'nwgf_ckpt_{steps}.pth'))
             print(f"step {steps}, loss {loss.item()}, time {time.time() - time_0}")
         # Print the averaged training loss so far.
         tqdm_epoch.set_description('Average Loss: {:5f}'.format(avg_loss / num_items))
         # Update the checkpoint after each epoch of training.
-        torch.save(score_model.state_dict(), 'nwgf_ckpt.pth')
+        torch.save(score_model.state_dict(), os.path.join(model_path, 'nwgf_ckpt.pth'))
 
 
-def test(args):
+def test(args, device):
     # score_model = torch.nn.DataParallel(ScoreNet(marginal_prob_std=marginal_prob_std_fn))
     # score_model = score_model.to(device)
     score_model = ScoreNet(marginal_prob_std=marginal_prob_std_fn).to(device)
     step = args.i
     ## Load the pre-trained checkpoint from disk.
+
+    model_path = os.path.join(args.dir, 'models')
+    sample_path = os.path.join(args.dir, 'samples')
+    if not os.path.exists(sample_path): os.makedirs(sample_path)
+
     if step > 0:
-        ckpt = torch.load(f'nwgf_ckpt_{step}.pth', map_location=device)
+        ckpt = torch.load(os.path.join(model_path, f'nwgf_ckpt_{step}.pth'), map_location=device)
     else:
         ckpt = torch.load('ckpt.pth', map_location=device)
     score_model.load_state_dict(ckpt)
@@ -158,7 +168,7 @@ def test(args):
                       diffusion_coeff_fn,
                       sample_batch_size,
                       device=device,
-                      eps=0)
+                      eps=1e-3)
 
     print(torch.max(samples))
 
@@ -172,9 +182,9 @@ def test(args):
     plt.axis('off')
     plt.imshow(sample_grid.permute(1, 2, 0).cpu(), vmin=0., vmax=1.)
     if step > 0:
-        plt.savefig(f"sample/sample_{step}.png")
+        plt.savefig(os.path.join(sample_path, f"sample_{step}.png"))
     else:
-        plt.savefig("sample/sample.png")
+        plt.savefig(os.path.join(sample_path, "sample.png"))
     plt.show()
 
 
@@ -215,19 +225,33 @@ def test_likelihood():
 if __name__ == '__main__':
     parser = argparse.ArgumentParser("diffusion")
     parser.add_argument('--test', action='store_true', help='Whether to test the model')
+    parser.add_argument('--random_init', action='store_true', help='Whether to load the pretrained score model')
     parser.add_argument('--i', type=int, default=50, help='test the performance at i th step')
     parser.add_argument('--n_epochs', type=int, default=50, help='max epochs of nwgf training')
     parser.add_argument('--batch_size', type=int, default=32, help='batch size of nwgf training')
     parser.add_argument('--lr', type=float, default=1e-4, help='learning rate of nwgf training')
-    parser.add_argument('--device_ids', type=str, default='0,')
+    parser.add_argument('--exp_decay', type=float, default=1e-3, help='exponential decay rate of nwgf training')
+    parser.add_argument('--score_0_t_0', type=float, default=1e-3, help='initial time of score_0')
+    parser.add_argument('--device_ids', type=str, default='0')
+    parser.add_argument('--log', type=str, default='0')
+    parser.add_argument('--atol', type=float, default=1e-4, help='absolute error tolerance when solving ODE')
+    parser.add_argument('--rtol', type=float, default=1e-4, help='relative error tolerance when solving ODE')
+
     args = parser.parse_args()
 
-    if not path.exists('ckpt.pth'):
+    if not os.path.exists('ckpt.pth'):
         train_score_net_init(args)
 
+    args.dir = os.path.join(f"log/exp{args.exp_decay}t_0{args.score_0_t_0}", args.log)
+    if not os.path.exists(args.dir): os.makedirs(args.dir)
+
+    device_ids = [int(a) for a in args.device_ids.split(",")]
+    device = torch.device("cuda:" + str(min(device_ids)))
+
+    print(args)
     if args.test:
-        test(args)
+        test(args, device)
     else:
-        train_nwgf(args)
+        train_nwgf(args, device)
 
     # test_likelihood()

@@ -2,8 +2,6 @@ import functools
 import torch
 import numpy as np
 
-device = 'cuda:0'  # @param ['cuda', 'cpu'] {'type':'string'}
-
 
 def marginal_prob_std(t, sigma):
     """Compute the mean and standard deviation of $p_{0t}(x(t) | x(0))$.
